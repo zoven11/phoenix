@@ -33,8 +33,8 @@ def test_parse_pdf_file_uses_ppx_with_temp_output(tmp_path, monkeypatch):
     result = parse_pdf_file_to_docjson(str(pdf_path))
 
     assert result == {"text": "single"}
-    assert commands[0][0:4] == ["ppx", "parse", str(pdf_path), "--out-dir"]
-    assert len(commands[0]) == 5
+    assert commands[0][0:5] == ["ppx", "parse", str(pdf_path), "--formula", "no"]
+    assert "--out-dir" in commands[0]
     assert "--workers" not in commands[0]
 
 
@@ -58,7 +58,8 @@ def test_parse_pdf_dir_maps_default_workers_to_ppx_zero(tmp_path, monkeypatch):
 
     assert result == {"a": {"text": "a"}, "b": {"text": "b"}}
     assert commands[0][0:3] == ["ppx", "parse", str(pdf_dir)]
-    assert commands[0][3:5] == ["--workers", "0"]
+    assert "--formula" in commands[0]
+    assert commands[0][commands[0].index("--workers"):commands[0].index("--workers") + 2] == ["--workers", "0"]
 
 
 def test_parse_pdf_dir_passes_custom_workers(tmp_path, monkeypatch):
@@ -77,7 +78,7 @@ def test_parse_pdf_dir_passes_custom_workers(tmp_path, monkeypatch):
 
     parse_pdf_dir_to_docjsons(pdf_dir, workers=4)
 
-    assert commands[0][3:5] == ["--workers", "4"]
+    assert commands[0][commands[0].index("--workers"):commands[0].index("--workers") + 2] == ["--workers", "4"]
 
 
 def test_parse_pdf_files_uses_temp_input_directory(tmp_path, monkeypatch):
@@ -176,6 +177,30 @@ def test_parse_pdf_file_reports_ppx_failure(tmp_path, monkeypatch):
 
     with pytest.raises(ParseError, match="exit code: 2"):
         parse_pdf_file_to_docjson(str(pdf_path))
+
+
+def test_parse_pdf_file_retries_without_tables_on_table_assertion(tmp_path, monkeypatch):
+    pdf_path = tmp_path / "a.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4")
+    commands = []
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        output_dir = Path(command[command.index("--out-dir") + 1])
+        if "--table" not in command:
+            _write_docjson(output_dir / "partial.json", "partial")
+            return subprocess.CompletedProcess(command, 1, stdout="_parse_tables BBox.join", stderr="AssertionError")
+        _write_docjson(output_dir / "doc.json", "fallback")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = parse_pdf_file_to_docjson(str(pdf_path))
+
+    assert result == {"text": "fallback"}
+    assert len(commands) == 2
+    assert "--table" not in commands[0]
+    assert commands[1][commands[1].index("--table"):commands[1].index("--table") + 2] == ["--table", "no"]
 
 
 def test_parse_pdf_file_reports_missing_docjson(tmp_path, monkeypatch):

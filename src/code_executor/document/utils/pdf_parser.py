@@ -238,16 +238,61 @@ def _run_ppx_parse(
     workers: int | None = None,
     extra_args: Sequence[str] | None = None,
 ) -> None:
-    command = [ppx_command, "parse", str(input_path)]
+    command = _build_ppx_parse_command(
+        input_path,
+        output_dir,
+        ppx_command=ppx_command,
+        workers=workers,
+    )
+    result = _run_ppx_command(command, ppx_command=ppx_command)
+    if result.returncode == 0:
+        return
+
+    message = _format_ppx_error(input_path, command, result)
+    if not _should_retry_without_tables(message):
+        raise ParseError(message, command=command)
+
+    shutil.rmtree(output_dir, ignore_errors=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    fallback_command = _build_ppx_parse_command(
+        input_path,
+        output_dir,
+        ppx_command=ppx_command,
+        workers=workers,
+        table_mode="no",
+    )
+    fallback_result = _run_ppx_command(fallback_command, ppx_command=ppx_command)
+    if fallback_result.returncode == 0:
+        return
+
+    fallback_message = _format_ppx_error(input_path, fallback_command, fallback_result)
+    raise ParseError(
+        message + "\n\nppx parse 已因表格解析错误降级重试 --table no，但仍失败：\n" + fallback_message,
+        command=fallback_command,
+    )
+
+
+def _build_ppx_parse_command(
+    input_path: Path,
+    output_dir: Path,
+    *,
+    ppx_command: str,
+    workers: int | None = None,
+    table_mode: str | None = None,
+) -> list[str]:
+    command = [ppx_command, "parse", str(input_path), "--formula", "no"]
+    if table_mode:
+        command.extend(["--table", table_mode])
     if workers is not None:
         command.extend(["--workers", str(_map_ppx_workers(workers))])
     command.extend(["--out-dir", str(output_dir)])
-    if extra_args:
-        command.extend(extra_args)
+    return command
 
+
+def _run_ppx_command(command: Sequence[str], *, ppx_command: str) -> subprocess.CompletedProcess[str]:
     try:
-        result = subprocess.run(
-            command,
+        return subprocess.run(
+            list(command),
             capture_output=True,
             text=True,
             check=False,
@@ -260,19 +305,37 @@ def _run_ppx_parse(
             command=command,
         ) from exc
 
-    if result.returncode != 0:
-        stderr = (result.stderr or "").strip()
-        stdout = (result.stdout or "").strip()
-        message = (
-            f"ppx parse 失败: {input_path}\n"
-            f"command: {' '.join(command)}\n"
-            f"exit code: {result.returncode}"
-        )
-        if stderr:
-            message += f"\nstderr: {stderr}"
-        if stdout:
-            message += f"\nstdout: {stdout}"
-        raise ParseError(message, command=command)
+
+def _format_ppx_error(
+    input_path: Path,
+    command: Sequence[str],
+    result: subprocess.CompletedProcess[str],
+) -> str:
+    stderr = (result.stderr or "").strip()
+    stdout = (result.stdout or "").strip()
+    message = (
+        f"ppx parse 失败: {input_path}\n"
+        f"command: {' '.join(command)}\n"
+        f"exit code: {result.returncode}"
+    )
+    if stderr:
+        message += f"\nstderr: {stderr}"
+    if stdout:
+        message += f"\nstdout: {stdout}"
+    return message
+
+
+def _should_retry_without_tables(message: str) -> bool:
+    table_error_markers = (
+        "_parse_tables",
+        "BBox.join",
+        "table/line.py",
+        "table/ybk.py",
+        "table/wbk.py",
+        "AssertionError",
+        "存在None的BBox",
+    )
+    return any(marker in message for marker in table_error_markers)
 
 
 def _parse_pdf_files_individually(

@@ -166,3 +166,53 @@ def extract(document: Document, tool_hub):
     assert captured["tool_hub"] == {"name": "eval-hub"}
     assert captured["concurrent"] == 3
     assert isinstance(result.result, ObjectEvaluationResult)
+
+
+@pytest.mark.asyncio
+async def test_extract_from_docjson_can_include_sources(monkeypatch):
+    from xdev.extract import extract_from_docjson
+
+    docjson = {
+        "pages": [{"number": 1, "bbox": [0, 0, 100, 100]}],
+        "tree": {
+            "root": {
+                "id": 0,
+                "type": "title",
+                "parent_path": [],
+                "page_number": 0,
+                "data": {"text": "", "textlines": []},
+                "children": [
+                    {
+                        "id": 1,
+                        "type": "title",
+                        "parent_path": [],
+                        "page_number": 1,
+                        "data": {
+                            "text": "测试标题",
+                            "textlines": [
+                                {
+                                    "text": "测试标题",
+                                    "page_number": 1,
+                                    "bbox": [1, 2, 30, 12],
+                                }
+                            ],
+                        },
+                        "children": [],
+                    }
+                ],
+            }
+        },
+    }
+    program = """
+from code_executor.document.models.document import Document
+
+def extract(document: Document):
+    return {"标题": document.get_all_texts()[0]}
+"""
+    monkeypatch.setattr("xdev.setup.prepare_extraction_runtime", lambda: _runtime())
+
+    result = await extract_from_docjson(docjson, program=program, include_sources=True)
+
+    assert result["data"] == {"标题": "测试标题"}
+    assert result["sources"]["标题"][0]["page"] == 1
+    assert result["sources"]["标题"][0]["bbox"] == [1, 2, 30, 12]

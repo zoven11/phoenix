@@ -13,6 +13,7 @@ async def extract_from_docjson(
     workspace: str | Path | None = None,
     config: dict | None = None,
     pdf_bytes: bytes | None = None,
+    include_sources: bool = False,
 ) -> Any:
     """从 docjson 执行提取
 
@@ -21,10 +22,16 @@ async def extract_from_docjson(
     - workspace: workspace 目录路径
     - config: 旧格式配置字典
 
+    Args:
+        include_sources: 为 True 时返回 {"data": result, "sources": ...}，
+            sources 按字段路径映射到页码、节点、行文本和 bbox。默认 False，
+            保持原有返回结构不变。
+
     Raises:
         ValueError: 当输入参数不合法时
     """
     from code_executor.executor import execute
+    from code_executor.provenance import locate_result_sources_from_docjson
 
     provided = sum(x is not None for x in [program, workspace, config])
     if provided == 0:
@@ -43,18 +50,27 @@ async def extract_from_docjson(
             "`extract(document: Document, tool_hub: ToolHub)` 返回完整结果。"
         )
 
+    result = None
     if workspace is not None:
-        return await execute(
+        result = await execute(
             workspace=workspace,
             docjson=docjson,
             pdf_bytes=pdf_bytes,
             tool_hub=runtime.tool_hub,
         )
-    if program is not None:
-        return await execute(
+    elif program is not None:
+        result = await execute(
             program=program,
             docjson=docjson,
             pdf_bytes=pdf_bytes,
             tool_hub=runtime.tool_hub,
         )
+
+    if result is not None:
+        if include_sources:
+            return {
+                "data": result,
+                "sources": locate_result_sources_from_docjson(result, docjson),
+            }
+        return result
     raise ValueError("必须提供 program、workspace 或 config 之一")

@@ -40,6 +40,13 @@ from .structure import Table, Cell
 from .get_tools import create_default_tool_hub
 from .utils import get_structure_code, get_llm_context
 from .run_config import eval_config, EvalResult
+from .provenance import (
+    SourceLocation,
+    flatten_document_sources,
+    locate_result_sources,
+    locate_result_sources_from_docjson,
+    locate_value_sources,
+)
 
 # NER 子模块导出
 from .ner import NERPattern, Match, StringWithNER, NerApi
@@ -70,6 +77,11 @@ __all__ = [
     'to_plain_article',
     'eval_config',
     'EvalResult',
+    'SourceLocation',
+    'flatten_document_sources',
+    'locate_result_sources',
+    'locate_result_sources_from_docjson',
+    'locate_value_sources',
     
     # 已废弃接口（向后兼容）
     'do_extract',  # deprecated
