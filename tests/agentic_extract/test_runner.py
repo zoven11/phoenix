@@ -14,6 +14,7 @@ class FakeStateManager:
         self.current_iteration = 0
         self.status = None
         self.saved = 0
+        self.latest_evaluation = None
 
     def init(self):
         return None
@@ -34,9 +35,13 @@ class FakeStateManager:
         return "def456"
 
     def record_iteration(self, decision, **kwargs):
-        _ = kwargs
         self.current_iteration += 1
         self.last_action = decision.action
+        if kwargs.get("evaluation") is not None:
+            self.latest_evaluation = kwargs["evaluation"]
+
+    def get_latest_evaluation(self):
+        return self.latest_evaluation
 
     def mark_completed(self):
         self.status = "completed"
@@ -152,6 +157,7 @@ async def test_runner_success_path_emits_events_and_heartbeat(monkeypatch, tmp_p
     events = []
     decisions = [
         SimpleNamespace(action="call_dev", reasoning="write code", task="implement"),
+        SimpleNamespace(action="evaluate", reasoning="check", task="eval"),
         SimpleNamespace(action="done", reasoning="done", task=""),
     ]
 
@@ -163,6 +169,17 @@ async def test_runner_success_path_emits_events_and_heartbeat(monkeypatch, tmp_p
         _ = (args, kwargs)
         return SimpleNamespace(supported=True, usage=None)
 
+    def fake_run_xdev_eval(_workspace_path, *, timeout=300):
+        _ = timeout
+        return SimpleNamespace(
+            accuracy=1.0,
+            field_average=1.0,
+            doc_count=1,
+            error_count=0,
+            field_accuracies={},
+            error_doc_ids=[],
+        )
+
     monkeypatch.setattr("agentic_extract.runner.create_workspace", lambda path: tmp_path / path)
     monkeypatch.setattr("agentic_extract.runner.setup_environment", lambda _workspace: None)
     monkeypatch.setattr("agentic_extract.runner.init_workspace", lambda _workspace: None)
@@ -170,6 +187,7 @@ async def test_runner_success_path_emits_events_and_heartbeat(monkeypatch, tmp_p
     monkeypatch.setattr("agentic_extract.runner.StateManager", FakeStateManager)
     monkeypatch.setattr("agentic_extract.runner.probe_structured_output", fake_probe)
     monkeypatch.setattr("agentic_extract.runner.get_supervisor_decision", fake_get_supervisor_decision)
+    monkeypatch.setattr("agentic_extract.runner.run_xdev_eval", fake_run_xdev_eval)
     monkeypatch.setattr("agentic_extract.runner.create_supervisor", lambda **kwargs: FakeSupervisorAgent())
     monkeypatch.setattr("agentic_extract.runner.create_business_agent", lambda **kwargs: FakeBusinessAgent())
     monkeypatch.setattr("agentic_extract.runner.create_dev_agent", lambda **kwargs: FakeDevAgent())
@@ -189,7 +207,7 @@ async def test_runner_success_path_emits_events_and_heartbeat(monkeypatch, tmp_p
 
     event_types = [event.type for event in events]
     assert result.status == "completed"
-    assert result.iteration_count == 2
+    assert result.iteration_count == 3
     assert "run_started" in event_types
     assert "supervisor_decided" in event_types
     assert "iteration_completed" in event_types
@@ -305,9 +323,25 @@ async def test_runner_reuses_mature_workspace_without_creating_templates(monkeyp
         _ = (args, kwargs)
         return SimpleNamespace(supported=True, usage=None)
 
+    decisions = [
+        SimpleNamespace(action="evaluate", reasoning="check", task="eval"),
+        SimpleNamespace(action="done", reasoning="done", task=""),
+    ]
+
     async def fake_get_supervisor_decision(*args, **kwargs):
         _ = (args, kwargs)
-        return SimpleNamespace(action="done", reasoning="done", task="")
+        return decisions.pop(0)
+
+    def fake_run_xdev_eval(_workspace_path, *, timeout=300):
+        _ = timeout
+        return SimpleNamespace(
+            accuracy=1.0,
+            field_average=1.0,
+            doc_count=1,
+            error_count=0,
+            field_accuracies={},
+            error_doc_ids=[],
+        )
 
     def fail_create_workspace(_path):
         pytest.fail("create_workspace should not be called for a mature reusable workspace")
@@ -319,6 +353,7 @@ async def test_runner_reuses_mature_workspace_without_creating_templates(monkeyp
     monkeypatch.setattr("agentic_extract.runner.StateManager", FakeStateManager)
     monkeypatch.setattr("agentic_extract.runner.probe_structured_output", fake_probe)
     monkeypatch.setattr("agentic_extract.runner.get_supervisor_decision", fake_get_supervisor_decision)
+    monkeypatch.setattr("agentic_extract.runner.run_xdev_eval", fake_run_xdev_eval)
     monkeypatch.setattr("agentic_extract.runner.create_supervisor", lambda **kwargs: FakeSupervisorAgent())
     monkeypatch.setattr("agentic_extract.runner.create_business_agent", lambda **kwargs: FakeBusinessAgent())
     monkeypatch.setattr("agentic_extract.runner.create_dev_agent", lambda **kwargs: FakeDevAgent())
