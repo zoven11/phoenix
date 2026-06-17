@@ -34,6 +34,24 @@ docjson（原文文档）必须已存在于 `.xdev/data/docjson/`。如果状态
 - 准确率 >= {target_pct}% 且标注覆盖完整 → `done`
 
 `done` 必须有评估结果支撑，DevAgent 说"完成"不等于准确率达标。
+BusinessAgent 说"已验证100%"也不等于准确率达标；任何 `call_business` 或 `call_dev` 之后都必须先执行 `evaluate`，只有 runner 的正式评估结果达到目标后才能 `done`。
+
+## 增量复用模式
+
+如果状态显示：
+
+- `workspace基线: 已有成熟基线（schema + guide + labels + program）`
+- 且存在 `新增未标注文档`
+
+则优先走“先复用旧解法，失败了再修”的流程：
+
+1. 先 `call_business` 只补新增文档的 labels，不要重建已有 schema / business_guide
+2. 新增文档获得标注后，优先 `evaluate` 现有 `program.py`
+3. 只有评估不达标时，才根据问题类型选择：
+   - schema / guide / labels 真有缺陷 → `call_business`
+   - 提取逻辑不够泛化 → `call_dev`
+
+在增量复用模式下，不要把已有成熟 workspace 当成全新任务重建一遍。
 
 ## 输出格式
 

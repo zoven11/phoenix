@@ -98,7 +98,7 @@ async def test_auto_async_resolves_prepare_and_runs(monkeypatch, tmp_path):
     def fake_prepare_workspace_data(workspace, prepare_spec):
         captured["prepare_workspace"] = workspace
         captured["prepare_spec"] = prepare_spec
-        return PrepareDecision(action="bootstrap", reason="bootstrapped")
+        return PrepareDecision(action="bootstrap", reason="bootstrapped", details={"doc_count": 2})
 
     async def fake_run(resolved_settings, *, dry_run=False, on_event=None, heartbeat_interval_sec=10.0):
         captured["run_settings"] = resolved_settings
@@ -143,6 +143,7 @@ async def test_auto_async_resolves_prepare_and_runs(monkeypatch, tmp_path):
         "prepare_started",
         "prepare_completed",
     ]
+    assert lines[4]["details"] == {"doc_count": 2}
 
 
 @pytest.mark.asyncio

@@ -35,6 +35,7 @@ EventType = Literal[
 ]
 ReasoningEffort = Literal["low", "medium", "high"]
 SupervisorMode = Literal["default", "simple"]
+WorkspaceMode = Literal["default", "incremental_reuse"]
 PrepareMode = Literal["existing", "bootstrap_if_missing"]
 
 
@@ -152,6 +153,7 @@ PrepareSource = (
 class PrepareSpec(BaseModel):
     mode: PrepareMode = "existing"
     source: PrepareSource = Field(default_factory=PrepareSourceExisting)
+    sync_on_same_source: bool = False
 
 
 class RunRequest(BaseModel):
@@ -198,11 +200,20 @@ class RunRequest(BaseModel):
     preserve_thinking: bool = False
     dry_run: bool = False
     supervisor_mode: SupervisorMode = "simple"
+    workspace_mode: WorkspaceMode = "default"
     use_responses_api: bool = False
     agent_max_iters: int = 25
     supervisor_max_iters: int | None = None
     business_max_iters: int | None = None
     dev_max_iters: int | None = None
+    memory_enabled: bool = False
+    memory_top_k: int = 8
+    memory_runtime_dirname: str = ".phoenix_memory"
+    memory_shared_pool_enabled: bool = True
+    memory_global_dir: str | None = None
+    document_category: str | None = None
+    document_family: str | None = None
+    document_topic: str | None = None
 
     heartbeat_interval_sec: float = 10.0
     on_event: ProgressCallback | None = Field(default=None, exclude=True, repr=False)

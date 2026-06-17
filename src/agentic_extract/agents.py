@@ -7,10 +7,11 @@ Agent 创建工厂
 
 import copy
 import logging
+from collections.abc import Callable
 
 from agentscope.agent import ReActAgent
 from agentscope.memory import InMemoryMemory
-from agentscope.tool import Toolkit, execute_shell_command, view_text_file
+from agentscope.tool import Toolkit, ToolResponse, execute_shell_command, view_text_file
 from agentscope.token import OpenAITokenCounter
 
 
@@ -122,6 +123,50 @@ from .agent_classes import Supervisor, BusinessAgent, DevAgent
 logger = logging.getLogger(__name__)
 
 
+def _is_full_xdev_eval(command: str) -> bool:
+    normalized = " ".join(command.strip().split())
+    return normalized in {
+        "xdev eval",
+        "uv run xdev eval",
+        "uv run xdev eval --data-dir .xdev",
+    }
+
+
+def create_workspace_shell_tool(
+    *,
+    timeout: float = 300.0,
+    allow_full_eval: bool = True,
+) -> Callable:
+    """Create a shell tool wrapper with a Phoenix-controlled default timeout."""
+
+    async def phoenix_execute_shell_command(command: str, timeout_sec: float | None = None):
+        if not allow_full_eval and _is_full_xdev_eval(command):
+            return ToolResponse(
+                content=[
+                    {
+                        "type": "text",
+                        "text": (
+                            "<returncode>2</returncode><stdout></stdout>"
+                            "<stderr>DevAgent repair mode blocks full `xdev eval`. "
+                            "Use `xdev run <doc_id>` for targeted diagnosis, inspect the "
+                            "Supervisor-provided evaluation summary, then modify program.py. "
+                            "The runner will perform the official full evaluation after "
+                            "DevAgent returns.</stderr>"
+                        ),
+                    },
+                ],
+            )
+        effective_timeout = timeout if timeout_sec is None else timeout_sec
+        return await execute_shell_command(command=command, timeout=int(effective_timeout))
+
+    phoenix_execute_shell_command.__name__ = "execute_shell_command"
+    phoenix_execute_shell_command.__doc__ = (
+        "Execute a shell command in the current workspace. "
+        "Optional timeout_sec overrides Phoenix default command timeout."
+    )
+    return phoenix_execute_shell_command
+
+
 # ---------------------------------------------------------------------------
 # Tool schema 兼容性修复
 # ---------------------------------------------------------------------------
@@ -225,10 +270,18 @@ def _create_compression_config(
 def _create_base_toolkit(
     limit_write_lines: bool = False,
     max_write_lines: int = 100,
+    *,
+    shell_timeout: float = 300.0,
+    allow_full_eval: bool = True,
 ) -> CleanToolkit:
     """创建基础工具集（shell + 文件读写）"""
     toolkit = CleanToolkit()
-    toolkit.register_tool_function(execute_shell_command)
+    toolkit.register_tool_function(
+        create_workspace_shell_tool(
+            timeout=shell_timeout,
+            allow_full_eval=allow_full_eval,
+        )
+    )
     toolkit.register_tool_function(view_text_file)
     register_file_tools(toolkit, limit_write_lines, max_write_lines)
     return toolkit
@@ -260,7 +313,7 @@ def create_supervisor(
     if simple_mode:
         toolkit = CleanToolkit()
     else:
-        toolkit = _create_base_toolkit()
+        toolkit = _create_base_toolkit(shell_timeout=timeout)
 
     model_kwargs: dict = {}
     if reasoning_effort:
@@ -321,7 +374,11 @@ def create_business_agent(
     """创建 BusinessAgent"""
     sys_prompt, _ = assemble_business_prompt(readonly_labels)
 
-    toolkit = _create_base_toolkit(limit_write_lines, max_write_lines)
+    toolkit = _create_base_toolkit(
+        limit_write_lines,
+        max_write_lines,
+        shell_timeout=timeout,
+    )
 
     # 注册批量标注工具（默认使用 business agent 自身的模型配置）
     from .labeling.workflow import create_label_all_documents_tool
@@ -391,7 +448,12 @@ def create_dev_agent(
     """创建 DevAgent"""
     sys_prompt, _ = assemble_dev_prompt()
 
-    toolkit = _create_base_toolkit(limit_write_lines, max_write_lines)
+    toolkit = _create_base_toolkit(
+        limit_write_lines,
+        max_write_lines,
+        shell_timeout=timeout,
+        allow_full_eval=False,
+    )
 
     model_kwargs: dict = {}
     if reasoning_effort:

@@ -36,6 +36,7 @@ docjson（原文文档）必须已存在于 `.xdev/data/docjson/`。如果不存
 - 准确率 >= {target_pct}% 且标注覆盖完整 → `done`
 
 `done` 必须有评估结果支撑，DevAgent 说"完成"不等于准确率达标。
+BusinessAgent 说"已验证100%"也不等于准确率达标；任何 `call_business` 或 `call_dev` 之后都必须先执行 `evaluate`，只有 runner 的正式评估结果达到目标后才能 `done`。
 
 ## 输出格式
 

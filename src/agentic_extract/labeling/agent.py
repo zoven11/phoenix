@@ -14,7 +14,7 @@ from agentscope.message import Msg
 logger = logging.getLogger(__name__)
 from agentscope.agent import ReActAgent
 from agentscope.memory import InMemoryMemory
-from agentscope.tool import Toolkit, execute_shell_command, view_text_file
+from agentscope.tool import Toolkit, view_text_file
 
 from . import prompts as labeling_prompts
 
@@ -57,11 +57,12 @@ class LabelingAgent:
         Returns:
             True 标注成功，False 标注失败
         """
+        from ..agents import create_workspace_shell_tool
         from ..model_factory import create_model
         from ..tools import register_file_tools
 
         toolkit = Toolkit()
-        toolkit.register_tool_function(execute_shell_command)
+        toolkit.register_tool_function(create_workspace_shell_tool(timeout=self._timeout))
         toolkit.register_tool_function(view_text_file)
         register_file_tools(toolkit)
 

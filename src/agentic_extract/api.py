@@ -200,6 +200,7 @@ async def run_agentic_extract_auto_async(
                 category="system",
                 action=decision.action,
                 reason=decision.reason,
+                details=decision.details,
             )
             emit_event(
                 "prepare_started",
@@ -220,6 +221,7 @@ async def run_agentic_extract_auto_async(
                 category="system",
                 action=applied_decision.action,
                 reason=applied_decision.reason,
+                details=applied_decision.details,
             )
 
         return await _run_settings_async(

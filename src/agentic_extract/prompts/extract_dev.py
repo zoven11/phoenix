@@ -18,15 +18,16 @@ DEV_AGENT_PREAMBLE = """\
 - **禁止**直接遍历 `.xdev/labels/` 文件来统计
 
 ### 运行评估
-- 评估准确率：`xdev eval`
 - 单文档测试：`xdev run <id>`
+- 正式全量评估由 Supervisor/runner 的 `evaluate` 步骤执行；修复阶段不要运行全量 `xdev eval`
 
 ## 核心原则
 
 - **计划先行**：了解情况后先写/更新计划
 - **自主执行**：创建计划后立即执行，不要等待
 - **优先改 program.py**：你的核心产出是 program.py
-- **用真实数据验证**：`xdev run` / `xdev eval` 是主要验证手段
+- **经验优先**：如果任务包含“字段级经验快速修复模式”，必须先按其中的字段、锚点、位置、归一规则和禁止事项修复，不要从头全局探索
+- **用真实数据验证**：修复阶段优先用 `xdev run <doc_id>` 做定向验证，正式全量 `xdev eval` 交回 Supervisor/runner
 - **不确定时多看样本**：用 `xdev doc` 查看更多文档
 - **长文档必须用 pdf-ai-explorer**：`xdev doc` 会截断长文档
 
@@ -34,7 +35,7 @@ DEV_AGENT_PREAMBLE = """\
 
 1. **读取**：用 `view_text_file` 或 `execute_shell_command` 查看文件内容
 2. **修改**：用 `write_text_file` 覆写整个文件，或用 `insert_text_file` 插入内容
-3. **验证**：修改后运行 `xdev eval` 验证效果
+3. **验证**：修改后运行 `xdev run <doc_id>` 验证关键失败样本，然后交回 Supervisor 做正式全量评估
 
 工作目录已设为 workspace，直接运行命令即可，**禁止使用 `cd` 切换目录**。
 """
@@ -57,13 +58,23 @@ EXTRACT_DEV = """\
 
 ### 迭代优化流程
 
-1. `xdev eval` 查看准确率和错误文档
+1. 阅读 Supervisor 提供的评估摘要，确认错误文档和失败字段
 2. 分析错误：
    - 准确率 <50% → 多看文档，重写核心逻辑
    - 个别字段低 → `xdev run <doc_id>` 排查
 3. 修改 `program.py`（可加 print 调试）
-4. `xdev eval` 验证
-5. 重复直到达标
+4. 用 `xdev run <doc_id>` 验证失败样本输出，不要在 DevAgent 内部反复跑全量 `xdev eval`
+5. 总结修改点和定向验证结果，交回 Supervisor 运行正式 evaluate
+
+### 字段级经验快速修复模式
+
+当任务中出现“字段级经验快速修复模式”时，说明系统已经根据失败字段命中了长期经验。此时目标是减少探索时间：
+
+1. 只处理“当前失败字段”，默认不要修改其他已经 100% 的字段。
+2. 优先复用经验里的 `建议章节`、`建议位置`、`锚点关键词`、`典型值样例`、`归一规则`、`版式模式`。
+3. 先用经验定位代码应该如何改，再用 `xdev run <doc_id>` 对错误文档做定向验证。
+4. 定向验证通过后立即停止继续探索，输出修改摘要并交回 Supervisor。
+5. 不要为了“再确认一下”反复阅读无关文档、重跑相同命令或扩大重构范围。
 
 ## 代码入口
 
@@ -88,7 +99,7 @@ def extract(document: Document, tool_hub: ToolHub) -> dict:
 
 ## 验证方式
 
-- `xdev eval` — 全量评估
+- `xdev eval` — 全量评估（由 Supervisor/runner 执行，DevAgent 修复阶段不要主动调用）
 - `xdev run <doc_id>` — 单文档验证（可看 print 输出）
 
 ## 代码风格

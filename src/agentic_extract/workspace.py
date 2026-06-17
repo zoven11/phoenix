@@ -153,4 +153,15 @@ def get_workspace_status(workspace_path: Path | str) -> str:
     else:
         lines.append("program.py: 不存在")
 
+    mature_base = (
+        schema_path.exists()
+        and guide_path.exists()
+        and program_path.exists()
+        and label_count > 0
+    )
+    if mature_base:
+        lines.append("workspace基线: 已有成熟基线（schema + guide + labels + program）")
+        if doc_count > label_count:
+            lines.append(f"新增未标注文档: {doc_count - label_count}")
+
     return "\n".join(lines)

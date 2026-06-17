@@ -251,6 +251,14 @@ class StateManager:
         data = json.loads(iter_path.read_text(encoding="utf-8"))
         return IterationRecord.model_validate(data)
 
+    def get_latest_evaluation(self) -> EvaluationSnapshot | None:
+        """Return the latest formal runner evaluation snapshot, if any."""
+        for i in range(self.current.current_iteration, 0, -1):
+            record = self.get_iteration_record(i)
+            if record and record.evaluation is not None:
+                return record.evaluation
+        return None
+
     def get_recent_summary(self, n: int = 5) -> str:
         """获取最近 N 次迭代的摘要（含准确率趋势）"""
         current_iter = self.current.current_iteration

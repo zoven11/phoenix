@@ -64,6 +64,7 @@ class AgenticExtractConfig(BaseModel):
 
     # Supervisor 模式：simple=无工具纯决策，默认使用 simple
     supervisor_mode: str = "simple"
+    workspace_mode: Literal["default", "incremental_reuse"] = "default"
 
     # 使用 OpenAI Responses API（替代 Chat Completions API）
     use_responses_api: bool = False
@@ -73,6 +74,16 @@ class AgenticExtractConfig(BaseModel):
     supervisor_max_iters: int | None = None
     business_max_iters: int | None = None
     dev_max_iters: int | None = None
+
+    # 长期记忆（独立运行时目录，不混入源码）
+    memory_enabled: bool = False
+    memory_top_k: int = 8
+    memory_runtime_dirname: str = ".phoenix_memory"
+    memory_shared_pool_enabled: bool = True
+    memory_global_dir: str | None = None
+    document_category: str | None = None
+    document_family: str | None = None
+    document_topic: str | None = None
 
     def get_agent_max_iters(self, agent: Literal["supervisor", "business", "dev"]) -> int:
         """Return the effective max_iters budget for a specific agent."""
@@ -177,6 +188,7 @@ def _apply_env_overrides(config_dict: dict[str, Any]) -> list[str]:
         "AE_STUDIO_URL": "studio_url",
         "AE_INITIAL_MESSAGE": "initial_message",
         "AE_REASONING_EFFORT": "reasoning_effort",
+        "AE_WORKSPACE_MODE": "workspace_mode",
         "AE_LABELING_MODEL": "labeling_model",
         "AE_LABELING_API_BASE": "labeling_api_base",
         "AE_LABELING_API_KEY": "labeling_api_key",
@@ -184,6 +196,14 @@ def _apply_env_overrides(config_dict: dict[str, Any]) -> list[str]:
         "AE_SUPERVISOR_MAX_ITERS": "supervisor_max_iters",
         "AE_BUSINESS_MAX_ITERS": "business_max_iters",
         "AE_DEV_MAX_ITERS": "dev_max_iters",
+        "AE_MEMORY_ENABLED": "memory_enabled",
+        "AE_MEMORY_TOP_K": "memory_top_k",
+        "AE_MEMORY_RUNTIME_DIRNAME": "memory_runtime_dirname",
+        "AE_MEMORY_SHARED_POOL_ENABLED": "memory_shared_pool_enabled",
+        "AE_MEMORY_GLOBAL_DIR": "memory_global_dir",
+        "AE_DOCUMENT_CATEGORY": "document_category",
+        "AE_DOCUMENT_FAMILY": "document_family",
+        "AE_DOCUMENT_TOPIC": "document_topic",
     }
 
     applied_env_keys: list[str] = []
@@ -203,8 +223,11 @@ def _apply_env_overrides(config_dict: dict[str, Any]) -> list[str]:
             "supervisor_max_iters",
             "business_max_iters",
             "dev_max_iters",
+            "memory_top_k",
         ]:
             value = int(value)
+        elif config_key in ["memory_enabled", "memory_shared_pool_enabled"]:
+            value = value.strip().lower() in {"1", "true", "yes", "on"}
 
         config_dict[config_key] = value
         applied_env_keys.append(env_key)

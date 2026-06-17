@@ -235,6 +235,109 @@ async def test_runner_failure_returns_failed_result(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_runner_passes_api_timeout_to_xdev_eval(monkeypatch, tmp_path):
+    decisions = [
+        SimpleNamespace(action="evaluate", reasoning="check", task="eval"),
+        SimpleNamespace(action="done", reasoning="done", task=""),
+    ]
+    captured = {}
+
+    async def fake_get_supervisor_decision(*args, **kwargs):
+        _ = (args, kwargs)
+        return decisions.pop(0)
+
+    async def fake_probe(*args, **kwargs):
+        _ = (args, kwargs)
+        return SimpleNamespace(supported=True, usage=None)
+
+    def fake_run_xdev_eval(workspace_path, *, timeout=300):
+        captured["workspace_path"] = workspace_path
+        captured["timeout"] = timeout
+        return SimpleNamespace(
+            accuracy=1.0,
+            field_average=1.0,
+            doc_count=2,
+            error_count=0,
+            field_accuracies={},
+            error_doc_ids=[],
+        )
+
+    monkeypatch.setattr("agentic_extract.runner.create_workspace", lambda path: tmp_path / path)
+    monkeypatch.setattr("agentic_extract.runner.setup_environment", lambda _workspace: None)
+    monkeypatch.setattr("agentic_extract.runner.init_workspace", lambda _workspace: None)
+    monkeypatch.setattr("agentic_extract.runner.ensure_workspace_ready", lambda _workspace: None)
+    monkeypatch.setattr("agentic_extract.runner.StateManager", FakeStateManager)
+    monkeypatch.setattr("agentic_extract.runner.probe_structured_output", fake_probe)
+    monkeypatch.setattr("agentic_extract.runner.get_supervisor_decision", fake_get_supervisor_decision)
+    monkeypatch.setattr("agentic_extract.runner.run_xdev_eval", fake_run_xdev_eval)
+    monkeypatch.setattr("agentic_extract.runner.create_supervisor", lambda **kwargs: FakeSupervisorAgent())
+    monkeypatch.setattr("agentic_extract.runner.create_business_agent", lambda **kwargs: FakeBusinessAgent())
+    monkeypatch.setattr("agentic_extract.runner.create_dev_agent", lambda **kwargs: FakeDevAgent())
+
+    settings = AgenticExtractSettings(
+        model="demo",
+        api_base="https://example.com",
+        api_key="secret",
+        workspace="workspace",
+        api_timeout=777,
+    )
+
+    result = await run_settings_async(settings)
+
+    assert result.status == "completed"
+    assert captured["timeout"] == 777
+
+
+@pytest.mark.asyncio
+async def test_runner_reuses_mature_workspace_without_creating_templates(monkeypatch, tmp_path):
+    events = []
+    workspace = tmp_path / "mature"
+    (workspace / ".xdev" / "data" / "docjson").mkdir(parents=True)
+    (workspace / ".xdev" / "manifest.json").write_text(
+        '{"source":{"type":"data-dir","path":"dummy"},"imported_at":"2026-01-01T00:00:00","doc_count":1}',
+        encoding="utf-8",
+    )
+    (workspace / ".xdev" / "data" / "docjson" / "doc1.json").write_text("{}", encoding="utf-8")
+    (workspace / "program.py").write_text("def extract(document, tool_hub):\n    return {}\n", encoding="utf-8")
+    (workspace / "business_guide.md").write_text("# guide\n", encoding="utf-8")
+
+    async def fake_probe(*args, **kwargs):
+        _ = (args, kwargs)
+        return SimpleNamespace(supported=True, usage=None)
+
+    async def fake_get_supervisor_decision(*args, **kwargs):
+        _ = (args, kwargs)
+        return SimpleNamespace(action="done", reasoning="done", task="")
+
+    def fail_create_workspace(_path):
+        pytest.fail("create_workspace should not be called for a mature reusable workspace")
+
+    monkeypatch.setattr("agentic_extract.runner.create_workspace", fail_create_workspace)
+    monkeypatch.setattr("agentic_extract.runner.setup_environment", lambda _workspace: None)
+    monkeypatch.setattr("agentic_extract.runner.init_workspace", lambda _workspace: None)
+    monkeypatch.setattr("agentic_extract.runner.ensure_workspace_ready", lambda _workspace: None)
+    monkeypatch.setattr("agentic_extract.runner.StateManager", FakeStateManager)
+    monkeypatch.setattr("agentic_extract.runner.probe_structured_output", fake_probe)
+    monkeypatch.setattr("agentic_extract.runner.get_supervisor_decision", fake_get_supervisor_decision)
+    monkeypatch.setattr("agentic_extract.runner.create_supervisor", lambda **kwargs: FakeSupervisorAgent())
+    monkeypatch.setattr("agentic_extract.runner.create_business_agent", lambda **kwargs: FakeBusinessAgent())
+    monkeypatch.setattr("agentic_extract.runner.create_dev_agent", lambda **kwargs: FakeDevAgent())
+
+    settings = AgenticExtractSettings(
+        model="demo",
+        api_base="https://example.com",
+        api_key="secret",
+        workspace=str(workspace),
+    )
+
+    result = await run_settings_async(settings, on_event=events.append)
+
+    assert result.status == "completed"
+    setup_completed = next(event for event in events if event.type == "phase_completed" and event.step == "setup")
+    assert setup_completed.data["reused_workspace"] is True
+
+
+@pytest.mark.asyncio
 async def test_legacy_run_request_async_warns_and_delegates(monkeypatch):
     captured = {}
 

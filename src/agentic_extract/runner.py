@@ -12,14 +12,24 @@ from extract_agent_common.workspace import create_workspace, setup_environment
 
 from .agents import create_business_agent, create_dev_agent, create_supervisor
 from .config import AgenticExtractSettings
+from .evolution_memory.runtime import EvolutionMemoryRuntime
 from .evaluate import format_eval_for_supervisor, run_xdev_eval
 from .runtime import RunRecorder, run_in_thread_with_heartbeat, run_with_heartbeat, runtime_scope
 from .state import StateManager
 from .supervisor import get_supervisor_decision, probe_structured_output, validate_api_connectivity
 from .types import EvaluationSummary, RunRequest, RunResult
-from .workspace import ensure_workspace_ready, get_workspace_status, init_workspace
+from .workspace import ensure_workspace_ready, get_workspace_status, init_workspace, workspace_has_runnable_data
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_runtime_workspace(settings: AgenticExtractSettings) -> tuple[Path, bool]:
+    """Return workspace path and whether it already contains reusable runtime assets."""
+    workspace_path = Path(settings.workspace).expanduser().resolve()
+    has_runtime_data = workspace_has_runnable_data(workspace_path, allow_normalize=True)
+    has_program = (workspace_path / "program.py").exists()
+    has_guide = (workspace_path / "business_guide.md").exists()
+    return workspace_path, bool(has_runtime_data and has_program and has_guide)
 
 
 def request_to_settings(request: RunRequest) -> AgenticExtractSettings:
@@ -38,6 +48,35 @@ def _evaluation_to_summary(evaluation) -> EvaluationSummary | None:
         field_average=evaluation.field_average,
         doc_count=evaluation.doc_count,
         error_count=evaluation.error_count,
+    )
+
+
+def _build_memory_guided_dev_task(
+    dev_task: str,
+    *,
+    field_memory_context: str | None,
+    failing_fields: list[str] | None,
+) -> str:
+    """Add focused field-memory repair instructions to the next DevAgent task."""
+    if not field_memory_context:
+        return dev_task
+
+    fields = ", ".join(failing_fields or []) or "当前失败字段"
+    return (
+        "[字段级经验快速修复模式]\n"
+        f"当前失败字段: {fields}\n"
+        "下面是 evaluate 后按失败字段精确检索到的长期经验。必须优先复用这些经验，"
+        "先应用其中的建议章节、锚点关键词、典型值样例、归一规则和禁止事项，"
+        "不要从头做全局探索。\n"
+        "执行约束：\n"
+        "1. 只围绕当前失败字段修改 program.py，除非依赖关系明确，不要重写其他已 100% 的字段。\n"
+        "2. 优先查看错误文档和相关锚点；用 xdev run <doc_id> 做定向验证。\n"
+        "3. 定向验证确认失败字段输出符合经验/标注后，立即总结并交回 Supervisor evaluate。\n"
+        "4. 不要在 DevAgent 内反复全量探索，也不要主动运行 xdev eval。\n\n"
+        "[命中的字段经验]\n"
+        f"{field_memory_context}\n\n"
+        "[Supervisor 原始任务]\n"
+        f"{dev_task}"
     )
 
 
@@ -192,20 +231,27 @@ async def run_settings_async(
             agentscope.init(studio_url=settings.studio_url)
 
         await recorder.start_phase("setup", message="initializing workspace and agents")
-        workspace_path = create_workspace(settings.workspace)
+        workspace_path, reuse_existing_workspace = _resolve_runtime_workspace(settings)
+        if not reuse_existing_workspace:
+            workspace_path = create_workspace(str(workspace_path))
         setup_environment(workspace_path)
         init_workspace(workspace_path)
         ensure_workspace_ready(workspace_path)
 
         state = StateManager(workspace_path)
         state.init()
+        memory_runtime = EvolutionMemoryRuntime.from_settings(settings, workspace_path)
 
         agents = _create_agents(settings)
         state.load_all_agents(agents)
         supervisor = agents["supervisor"]
         business_agent = agents["business_agent"]
         dev_agent = agents["dev_agent"]
-        await recorder.finish_phase("setup", message="setup completed")
+        await recorder.finish_phase(
+            "setup",
+            message="setup completed",
+            data={"reused_workspace": reuse_existing_workspace},
+        )
 
         use_structured = False
         await recorder.start_phase("probe", message="probing supervisor structured output support")
@@ -224,9 +270,15 @@ async def run_settings_async(
             data={"use_structured": use_structured},
         )
 
+        initial_parts: list[str] = []
+        memory_context = memory_runtime.build_initial_context()
+        if memory_context:
+            initial_parts.append(memory_context)
         if settings.initial_message:
+            initial_parts.append(settings.initial_message)
+        if initial_parts:
             await supervisor(
-                Msg(name="user", content=settings.initial_message, role="user")
+                Msg(name="user", content="\n\n".join(initial_parts), role="user")
             )
 
         start_timeout_monotonic = __import__("time").monotonic()
@@ -235,6 +287,8 @@ async def run_settings_async(
         consecutive_dev_calls = 0
         warn_threshold = 3
         hard_threshold = 6
+        pending_field_memory_context = ""
+        pending_failing_fields: list[str] = []
 
         try:
             for _ in range(settings.max_iterations):
@@ -245,6 +299,12 @@ async def run_settings_async(
                 recent = state.get_recent_summary()
                 msg_parts = [f"当前迭代: {iteration_num}\n\n最近迭代:\n{recent}"]
                 msg_parts.append(f"\nWorkspace 状态:\n{get_workspace_status(workspace_path)}")
+                if settings.workspace_mode == "incremental_reuse":
+                    msg_parts.append(
+                        "\n运行模式: incremental_reuse"
+                        "\n要求：如果已有成熟 workspace 且存在新增文档，"
+                        "先补新增文档标注，再评估现有 program.py，只有不达标时才修复。"
+                    )
                 if consecutive_dev_calls >= hard_threshold:
                     msg_parts.append(
                         f"\n⚠️ 已连续 {consecutive_dev_calls} 轮 call_dev 未评估。"
@@ -286,6 +346,34 @@ async def run_settings_async(
                 assert decision is not None
 
                 agent_output = ""
+                if decision.action == "done":
+                    latest_evaluation = state.get_latest_evaluation()
+                    if (
+                        latest_evaluation is None
+                        or latest_evaluation.accuracy < settings.target_accuracy
+                        or latest_evaluation.error_count > 0
+                    ):
+                        reason = (
+                            "Supervisor 请求 done，但最近一次正式 runner evaluate "
+                            "不存在或未达到目标；必须先运行 evaluate。"
+                        )
+                        await supervisor.observe(
+                            Msg(
+                                name="system",
+                                content=(
+                                    f"{reason}\n"
+                                    "注意：BusinessAgent/DevAgent 的口头自测结果不能作为 done 依据，"
+                                    "done 只能基于 runner 的 evaluate 快照。"
+                                ),
+                                role="system",
+                            )
+                        )
+                        decision.action = "evaluate"
+                        decision.reasoning = reason
+                        decision.task = (
+                            "运行正式评估，确认当前 program.py 与 labels 的真实准确率；"
+                            "只有 evaluate 达到目标后才能 done。"
+                        )
                 if decision.action == "done":
                     completed = True
                     exit_reason = f"supervisor 判断完成: {decision.reasoning}"
@@ -363,6 +451,7 @@ async def run_settings_async(
                             evaluation_snapshot = await run_in_thread_with_heartbeat(
                                 run_xdev_eval,
                                 workspace_path,
+                                timeout=int(settings.api_timeout),
                                 recorder=recorder,
                                 message="evaluate 仍在运行",
                             )
@@ -375,6 +464,29 @@ async def run_settings_async(
                         await supervisor.observe(
                             Msg(name="Evaluator", content=agent_output, role="user")
                         )
+                        pending_field_memory_context = ""
+                        pending_failing_fields = []
+                        if evaluation_snapshot and getattr(evaluation_snapshot, "failing_fields", None):
+                            pending_failing_fields = list(
+                                getattr(evaluation_snapshot, "failing_fields", []) or []
+                            )
+                            field_context = memory_runtime.build_field_context(
+                                field_names=pending_failing_fields,
+                                iteration=iteration_num,
+                            )
+                            pending_field_memory_context = field_context
+                            if field_context:
+                                await supervisor.observe(
+                                    Msg(
+                                        name="MemoryRuntime",
+                                        content=(
+                                            "以下是针对当前失败字段检索到的可复用经验，请在下一步决策中优先参考；"
+                                            "如果下一步 call_dev，会自动进入字段级经验快速修复模式：\n\n"
+                                            f"{field_context}"
+                                        ),
+                                        role="system",
+                                    )
+                                )
                         consecutive_dev_calls = 0
                         await recorder.finish_step("evaluate", message=iteration_summary)
                     except Exception as exc:
@@ -400,6 +512,11 @@ async def run_settings_async(
                                 "（schema 可能被 BusinessAgent 更新，以最新为准）:\n"
                                 f"{', '.join(cur_schema)}\n\n{decision.task}"
                             )
+                    dev_task = _build_memory_guided_dev_task(
+                        dev_task,
+                        field_memory_context=pending_field_memory_context,
+                        failing_fields=pending_failing_fields,
+                    )
                     result_msg = None
                     try:
                         with runtime_scope(iteration=iteration_num, step="dev_agent"):
@@ -427,6 +544,8 @@ async def run_settings_async(
                         await supervisor.observe(
                             Msg(name="DevAgent", content=agent_output, role="user")
                         )
+                        pending_field_memory_context = ""
+                        pending_failing_fields = []
                         consecutive_dev_calls += 1
                         iteration_summary = "call_dev completed"
                         await recorder.finish_step("dev_agent", message="dev_agent completed")
@@ -464,6 +583,15 @@ async def run_settings_async(
                     summary=iteration_result.summary,
                     error=iteration_result.error,
                 )
+                memory_runtime.record_iteration_evidence(
+                    iteration=iteration_num,
+                    action=decision.action,
+                    summary=iteration_result.summary,
+                    error=iteration_result.error,
+                    evaluation=evaluation_snapshot,
+                    git_commit_before=git_before,
+                    git_commit_after=git_after,
+                )
 
                 if settings.run_timeout:
                     elapsed = __import__("time").monotonic() - start_timeout_monotonic
@@ -485,6 +613,10 @@ async def run_settings_async(
                 state.mark_completed()
             else:
                 state.mark_failed(exit_reason)
+            memory_runtime.finalize_run(
+                exit_reason=exit_reason,
+                completed=completed,
+            )
             await recorder.finish_phase("finalize", message="finalize completed")
 
         status = "completed" if completed else "failed"

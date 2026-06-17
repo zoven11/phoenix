@@ -212,6 +212,15 @@ def _build_settings_overrides(
     reasoning_effort=None,
     preserve_thinking=False,
     supervisor_mode=None,
+    workspace_mode=None,
+    memory_enabled=False,
+    memory_top_k=None,
+    memory_runtime_dirname=None,
+    memory_shared_pool_enabled=None,
+    memory_global_dir=None,
+    document_category=None,
+    document_family=None,
+    document_topic=None,
 ):
     overrides = dict(_BUDGET_PRESETS.get(budget, {})) if budget else {}
     for key, value in {
@@ -237,6 +246,14 @@ def _build_settings_overrides(
         "initial_message": initial_message,
         "reasoning_effort": reasoning_effort,
         "supervisor_mode": supervisor_mode,
+        "workspace_mode": workspace_mode,
+        "memory_top_k": memory_top_k,
+        "memory_runtime_dirname": memory_runtime_dirname,
+        "memory_shared_pool_enabled": memory_shared_pool_enabled,
+        "memory_global_dir": memory_global_dir,
+        "document_category": document_category,
+        "document_family": document_family,
+        "document_topic": document_topic,
     }.items():
         if value is not None:
             overrides[key] = value
@@ -245,6 +262,8 @@ def _build_settings_overrides(
         overrides["readonly_labels"] = True
     if preserve_thinking:
         overrides["preserve_thinking"] = True
+    if memory_enabled:
+        overrides["memory_enabled"] = True
     return overrides
 
 
@@ -258,6 +277,7 @@ def _build_prepare_spec(
     pdfs_dir=None,
     data_dir=None,
     source_file=None,
+    sync_on_same_source=False,
 ) -> PrepareSpec:
     if (std_ids or std_ids_file) and not set_id:
         _abort_with_error("--std-ids / --std-ids-file 只能与 --set-id 一起使用")
@@ -282,14 +302,14 @@ def _build_prepare_spec(
             source_kwargs["std_ids"] = resolved_std_ids
         if limit is not None:
             source_kwargs["limit"] = limit
-        return PrepareSpec(source=PrepareSourceSetId(**source_kwargs))
+        return PrepareSpec(source=PrepareSourceSetId(**source_kwargs), sync_on_same_source=sync_on_same_source)
     if pdfs_dir is not None:
-        return PrepareSpec(source=PrepareSourcePdfDir(pdfs_dir=pdfs_dir))
+        return PrepareSpec(source=PrepareSourcePdfDir(pdfs_dir=pdfs_dir), sync_on_same_source=sync_on_same_source)
     if data_dir is not None:
-        return PrepareSpec(source=PrepareSourceDataDir(data_dir=data_dir))
+        return PrepareSpec(source=PrepareSourceDataDir(data_dir=data_dir), sync_on_same_source=sync_on_same_source)
     if source_file is not None:
-        return PrepareSpec(source=PrepareSourceConfigFile(source_file=source_file))
-    return PrepareSpec(source=PrepareSourceExisting())
+        return PrepareSpec(source=PrepareSourceConfigFile(source_file=source_file), sync_on_same_source=sync_on_same_source)
+    return PrepareSpec(source=PrepareSourceExisting(), sync_on_same_source=sync_on_same_source)
 
 
 def _collect_deprecated_run_prepare_options(
@@ -375,6 +395,15 @@ _RUN_OPTIONS = [
     click.option("--reasoning-effort", type=click.Choice(["low", "medium", "high"]), help="Reasoning effort (for o1/o3 models)"),
     click.option("--preserve-thinking", is_flag=True, help="保留 thinking blocks（解决 extended thinking 模型循环读取问题）"),
     click.option("--supervisor", "supervisor_mode", type=click.Choice(["default", "simple"]), help="Supervisor 模式：simple=无工具纯决策，default=带工具"),
+    click.option("--workspace-mode", type=click.Choice(["default", "incremental_reuse"]), help="workspace 运行模式：incremental_reuse=先复用现有程序评估新增文档"),
+    click.option("--memory-enabled", is_flag=True, help="启用长期记忆运行时（写入 workspace/.phoenix_memory/）"),
+    click.option("--memory-top-k", type=int, help="运行前最多注入多少条长期记忆"),
+    click.option("--memory-runtime-dirname", help="长期记忆运行时目录名（默认 .phoenix_memory）"),
+    click.option("--memory-shared-pool-enabled/--no-memory-shared-pool", default=None, help="是否启用按文档类别复用的共享经验池"),
+    click.option("--memory-global-dir", help="共享经验池根目录（默认 <repo>/local/memory_pool）"),
+    click.option("--document-category", help="显式指定当前 workspace 的业务文档类别，用于命中共享经验池"),
+    click.option("--document-family", help="显式指定文档大类，如 annual_report / bond_announcement"),
+    click.option("--document-topic", help="显式指定文档主题，如 audit_report / financial_statements / dividend_and_bonus_issue"),
     click.option("--heartbeat-interval-sec", type=float, default=10.0, show_default=True, help="heartbeat 间隔（秒）"),
     click.option("--dry-run", is_flag=True, help="只验证配置、workspace readiness 和 API 连通性，不运行 agent 循环"),
     click.option("--reset", is_flag=True, help="清除 logs/ 与 .agent_state/ 后重新开始"),
@@ -442,6 +471,15 @@ def run(
     reasoning_effort,
     preserve_thinking,
     supervisor_mode,
+    workspace_mode,
+    memory_enabled,
+    memory_top_k,
+    memory_runtime_dirname,
+    memory_shared_pool_enabled,
+    memory_global_dir,
+    document_category,
+    document_family,
+    document_topic,
     heartbeat_interval_sec,
     dry_run,
     reset,
@@ -506,6 +544,15 @@ def run(
         reasoning_effort=reasoning_effort,
         preserve_thinking=preserve_thinking,
         supervisor_mode=supervisor_mode,
+        workspace_mode=workspace_mode,
+        memory_enabled=memory_enabled,
+        memory_top_k=memory_top_k,
+        memory_runtime_dirname=memory_runtime_dirname,
+        memory_shared_pool_enabled=memory_shared_pool_enabled,
+        memory_global_dir=memory_global_dir,
+        document_category=document_category,
+        document_family=document_family,
+        document_topic=document_topic,
     )
 
     try:
@@ -573,6 +620,15 @@ def auto(
     reasoning_effort,
     preserve_thinking,
     supervisor_mode,
+    workspace_mode,
+    memory_enabled,
+    memory_top_k,
+    memory_runtime_dirname,
+    memory_shared_pool_enabled,
+    memory_global_dir,
+    document_category,
+    document_family,
+    document_topic,
     heartbeat_interval_sec,
     dry_run,
     reset,
@@ -600,6 +656,7 @@ def auto(
         pdfs_dir=pdfs_dir,
         data_dir=data_dir,
         source_file=source_file,
+        sync_on_same_source=(workspace_mode == "incremental_reuse"),
     )
     settings_overrides = _build_settings_overrides(
         model=model,
@@ -626,6 +683,15 @@ def auto(
         reasoning_effort=reasoning_effort,
         preserve_thinking=preserve_thinking,
         supervisor_mode=supervisor_mode,
+        workspace_mode=workspace_mode,
+        memory_enabled=memory_enabled,
+        memory_top_k=memory_top_k,
+        memory_runtime_dirname=memory_runtime_dirname,
+        memory_shared_pool_enabled=memory_shared_pool_enabled,
+        memory_global_dir=memory_global_dir,
+        document_category=document_category,
+        document_family=document_family,
+        document_topic=document_topic,
     )
 
     try:
