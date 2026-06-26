@@ -16,7 +16,7 @@ from .evidence import build_iteration_evidence
 from .models import EvolutionMemoryRecord, EvolutionMemoryUsage
 from .prompt import render_memory_context
 from .store import EvolutionMemoryStore
-from .summarize import build_field_candidates, build_run_candidate
+from .summarize import build_field_candidates, build_run_candidate, build_success_field_candidates
 from .validate import promote_candidate
 
 
@@ -25,6 +25,61 @@ class MemorySelection:
     memory: EvolutionMemoryRecord
     store: EvolutionMemoryStore
     source_pool: str
+
+
+
+
+_FIELD_GROUP_BY_FIELD = {
+    # Annual report audit fields
+    "is_audited": "audit_fields",
+    "domestic_audit_opinion_type": "audit_fields",
+    "domestic_signing_cpas": "audit_fields",
+    "domestic_audit_firm_name": "audit_fields",
+    # Annual report share-capital fields
+    "总股本": "share_capital_fields",
+    "已流通股份": "share_capital_fields",
+    "人民币普通股": "share_capital_fields",
+    "流通受限股份": "share_capital_fields",
+    "其他流通受限股份": "share_capital_fields",
+    "其中：境内自然人持股": "share_capital_fields",
+    "其他内资持股（受限）": "share_capital_fields",
+    "控股股东、实际控制人": "share_capital_fields",
+    # Annual report dividend fields
+    "转增比例 (10: X)": "dividend_fields",
+    "送股比例 (10: X)": "dividend_fields",
+    "派息比例[人民币] (10: X)": "dividend_fields",
+    # Annual report shareholder count fields
+    "A 股户数": "shareholder_count_fields",
+    "股东总户数": "shareholder_count_fields",
+    # Annual report financial indicator fields
+    "主要财务指标": "financial_indicator_fields",
+}
+
+
+MIN_FIELD_MEMORY_QUALITY_SCORE = 0.65
+MAX_EXACT_MEMORIES_PER_FIELD = 2
+MAX_GROUP_MEMORIES = 4
+MAX_TOTAL_FIELD_CONTEXT_MEMORIES = 8
+
+
+def _field_groups_for_fields(field_names: list[str] | None) -> set[str]:
+    groups: set[str] = set()
+    for name in field_names or []:
+        group = _FIELD_GROUP_BY_FIELD.get((name or "").strip())
+        if group:
+            groups.add(group)
+    return groups
+
+
+def _is_reliable_field_memory(selection: MemorySelection) -> bool:
+    memory = selection.memory
+    if memory.status != "active":
+        return False
+    if memory.quality_score < MIN_FIELD_MEMORY_QUALITY_SCORE:
+        return False
+    if memory.use_count >= 3 and memory.failure_count > memory.success_count:
+        return False
+    return True
 
 
 class EvolutionMemoryRuntime:
@@ -180,16 +235,67 @@ class EvolutionMemoryRuntime:
         return unique[: self.top_k]
 
     def selected_memories_for_fields(self, field_names: list[str] | None) -> list[MemorySelection]:
-        """Prefer field-specific memories for the current failing fields, with fallback."""
+        """Return high-signal memories for the current failing fields.
+
+        Field repair should be narrow and deterministic. Start from the full
+        candidate set instead of ``selected_memories()`` because that method has
+        already applied a global top-k cut; broad checkpoint memories can push
+        field-level repair memories out before we get a chance to match them.
+
+        Priority:
+        1. exact ``field_name`` matches;
+        2. mapped/current ``field_group`` matches;
+        3. a very small generic fallback.
+        """
         normalized = {name.strip() for name in (field_names or []) if name and name.strip()}
-        selections = self.selected_memories()
         if not normalized:
-            return selections
-        field_specific = [
-            item for item in selections if item.memory.field_name and item.memory.field_name in normalized
+            return self.selected_memories()
+
+        selections = [item for item in self._iter_candidate_memories() if _is_reliable_field_memory(item)]
+        if not selections:
+            return []
+
+        source_rank = {"workspace": 0, "topic": 1, "family": 2}
+
+        def sort_key(item: MemorySelection):
+            memory = item.memory
+            return (
+                source_rank.get(item.source_pool, 99),
+                memory.status != "active",
+                -memory.quality_score,
+                -memory.success_count,
+                memory.failure_count,
+                memory.title or memory.problem_pattern or memory.id,
+            )
+
+        exact: list[MemorySelection] = []
+        for field_name in sorted(normalized):
+            matches = [
+                item
+                for item in selections
+                if item.memory.field_name and item.memory.field_name.strip() == field_name
+            ]
+            matches.sort(key=sort_key)
+            exact.extend(matches[:MAX_EXACT_MEMORIES_PER_FIELD])
+        if exact:
+            exact.sort(key=sort_key)
+            return exact[: min(self.top_k, MAX_TOTAL_FIELD_CONTEXT_MEMORIES)]
+
+        target_groups = _field_groups_for_fields(list(normalized))
+        if self.field_group:
+            target_groups.add(self.field_group)
+        group_matches = [
+            item
+            for item in selections
+            if item.memory.field_group and item.memory.field_group in target_groups
         ]
-        generic = [item for item in selections if item not in field_specific]
-        return field_specific + generic
+        if group_matches:
+            group_matches.sort(key=sort_key)
+            return group_matches[: min(self.top_k, MAX_GROUP_MEMORIES, MAX_TOTAL_FIELD_CONTEXT_MEMORIES)]
+
+        generic = [item for item in selections if not item.memory.field_name]
+        generic.sort(key=sort_key)
+        return generic[: min(self.top_k, 2)]
 
     def build_initial_context(self) -> str:
         selections = self.selected_memories()
@@ -202,10 +308,7 @@ class EvolutionMemoryRuntime:
         selections = self.selected_memories_for_fields(field_names)
         if not selections:
             return ""
-        focused = [item for item in selections if item.memory.field_name]
-        if focused:
-            selections = focused + [item for item in selections if not item.memory.field_name]
-        selections = selections[: self.top_k]
+        selections = selections[: min(self.top_k, 3)]
         if self.enabled and selections:
             self._record_usage_for_selections(selections, iteration=iteration)
         return render_memory_context([item.memory for item in selections])
@@ -370,6 +473,71 @@ class EvolutionMemoryRuntime:
                     )
                     self.topic_store.upsert_memory(topic_memory)
         for candidate in build_field_candidates(
+            run_id=self.run_id,
+            evidence=evidence,
+            document_category=self.document_category,
+            document_family=self.document_family,
+            document_topic=self.document_topic,
+            field_group=self.field_group,
+        ):
+            self.workspace_store.append_candidate(candidate)
+            if self.family_store is not None and self.document_family:
+                self.family_store.append_candidate(
+                    candidate.model_copy(
+                        update={
+                            "id": uuid.uuid4().hex,
+                            "scope": "family",
+                            "document_category": self.document_category,
+                            "document_family": self.document_family,
+                            "document_topic": None,
+                            "field_group": None,
+                        }
+                    )
+                )
+            if self.topic_store is not None and self.document_topic:
+                self.topic_store.append_candidate(
+                    candidate.model_copy(
+                        update={
+                            "id": uuid.uuid4().hex,
+                            "scope": "topic",
+                            "document_category": self.document_category,
+                            "document_family": self.document_family,
+                            "document_topic": self.document_topic,
+                            "field_group": self.field_group,
+                        }
+                    )
+                )
+            memory = promote_candidate(candidate)
+            if memory is None:
+                continue
+            self.workspace_store.upsert_memory(memory)
+            if self.family_store is not None and self.document_family:
+                family_memory = memory.model_copy(
+                    update={
+                        "id": uuid.uuid4().hex,
+                        "scope": "family",
+                        "document_category": self.document_category,
+                        "document_family": self.document_family,
+                        "document_topic": None,
+                        "field_group": None,
+                        "source_pool": "family",
+                    }
+                )
+                self.family_store.upsert_memory(family_memory)
+            if self.topic_store is not None and self.document_topic:
+                topic_memory = memory.model_copy(
+                    update={
+                        "id": uuid.uuid4().hex,
+                        "scope": "topic",
+                        "document_category": self.document_category,
+                        "document_family": self.document_family,
+                        "document_topic": self.document_topic,
+                        "field_group": self.field_group,
+                        "source_pool": "topic",
+                    }
+                )
+                self.topic_store.upsert_memory(topic_memory)
+        for candidate in build_success_field_candidates(
             run_id=self.run_id,
             evidence=evidence,
             document_category=self.document_category,

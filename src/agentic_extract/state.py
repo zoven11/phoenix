@@ -46,6 +46,7 @@ class EvaluationSnapshot(BaseModel):
     error_count: int = 0
     error_doc_ids: list[str] = Field(default_factory=list)
     field_accuracies: dict[str, float] = Field(default_factory=dict)
+    failing_fields: list[str] = Field(default_factory=list)
     report_text: str = ""
 
 

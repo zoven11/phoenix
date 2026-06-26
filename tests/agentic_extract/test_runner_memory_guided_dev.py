@@ -1,4 +1,4 @@
-from agentic_extract.runner import _build_memory_guided_dev_task
+from agentic_extract.runner import _build_memory_guided_dev_task, _should_keep_business_decision
 from agentic_extract.state import EvaluationSnapshot, StateManager, SupervisorDecision
 
 
@@ -56,3 +56,14 @@ def test_state_manager_returns_latest_formal_evaluation(tmp_path):
     assert latest is not None
     assert latest.accuracy == 0.5
     assert latest.error_count == 1
+
+
+def test_should_keep_business_decision_requires_concrete_business_issue():
+    assert not _should_keep_business_decision(
+        "检查会议投票方式字段为什么失败",
+        "字段准确率低，可能需要看业务",
+    )
+    assert _should_keep_business_decision(
+        "检查标注不一致：labels 与 business_guide 冲突",
+        "需要修正标注冲突",
+    )

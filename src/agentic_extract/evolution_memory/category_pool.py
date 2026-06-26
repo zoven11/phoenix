@@ -79,6 +79,18 @@ _TOPIC_DEFINITIONS = {
             "年报审计",
         ],
     },
+    "annual_report_universal": {
+        "family": "annual_report",
+        "field_group": "annual_report_multi_module",
+        "aliases": [
+            "annual_report_universal",
+            "annual-report-universal",
+            "年报通用",
+            "通用年报",
+            "年报多字段",
+            "年度报告通用抽取",
+        ],
+    },
     "financial_statements": {
         "family": "annual_report",
         "field_group": "financial_statement_fields",
@@ -404,7 +416,6 @@ def _merge_detections(base: CategoryDetection | None, extra: CategoryDetection |
         return base
     family = base.document_family or extra.document_family
     topic = base.document_topic or extra.document_topic
-    field_group = base.field_group or extra.field_group
     raw_value = base.raw_value or extra.raw_value
     sources = [part for part in [base.source, extra.source] if part]
     merged_source = "+".join(dict.fromkeys(sources))

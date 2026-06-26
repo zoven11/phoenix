@@ -36,6 +36,8 @@ docjson（原文文档）必须已存在于 `.xdev/data/docjson/`。如果状态
 `done` 必须有评估结果支撑，DevAgent 说"完成"不等于准确率达标。
 BusinessAgent 说"已验证100%"也不等于准确率达标；任何 `call_business` 或 `call_dev` 之后都必须先执行 `evaluate`，只有 runner 的正式评估结果达到目标后才能 `done`。
 
+如果 MemoryRuntime 提供了“当前失败字段”的字段级经验，默认把它视为代码修复经验，优先 `call_dev` 做最小范围修复。只有存在明确证据说明 labels 缺失、schema 冲突、business_guide 与 labels 不一致时，才选择 `call_business`；不要因为字段提取失败就先怀疑标注。
+
 ## 增量复用模式
 
 如果状态显示：

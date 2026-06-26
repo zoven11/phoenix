@@ -16,6 +16,8 @@ def promote_candidate(candidate: EvolutionMemoryCandidate) -> EvolutionMemoryRec
     if not candidate.evidence_refs and not candidate.source_evidence_ids:
         return None
 
+    quality_score = 0.75 if candidate.category == "successful_field_location" else 0.6
+
     return EvolutionMemoryRecord(
         id=uuid.uuid4().hex,
         scope=candidate.scope,
@@ -39,7 +41,7 @@ def promote_candidate(candidate: EvolutionMemoryCandidate) -> EvolutionMemoryRec
         applicable_conditions=candidate.applicable_conditions,
         recommended_action=candidate.recommended_action,
         forbidden_action=candidate.forbidden_action,
-        quality_score=0.6,
+        quality_score=quality_score,
         use_count=0,
         success_count=0,
         failure_count=0,

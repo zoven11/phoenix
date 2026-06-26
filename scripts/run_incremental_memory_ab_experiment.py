@@ -30,6 +30,10 @@ DEFAULT_REPORT = REPO_ROOT / "local" / "reports" / "incremental_memory_ab_experi
 
 FIELD_ALIASES = {
     "股东大会届次次数": "股东大会届次",
+    "是否经过审计": "is_audited",
+    "境内审计意见类型": "domestic_audit_opinion_type",
+    "境内签名注册会计师": "domestic_signing_cpas",
+    "境内会计师事务所名称": "domestic_audit_firm_name",
 }
 
 
@@ -45,6 +49,22 @@ def load_schema_fields(base_workspace: Path) -> list[str]:
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
     data = schema.get("data") or {}
     return list(data.keys())
+
+
+def convert_label_value(field: str, value: str):
+    value = (value or "").strip()
+    if field == "is_audited":
+        if value in {"是", "true", "True", "TRUE", "1", "已审计"}:
+            return True
+        if value in {"否", "false", "False", "FALSE", "0", "未审计"}:
+            return False
+        return False
+    if field == "domestic_signing_cpas":
+        if not value:
+            return []
+        normalized = value.replace("，", "、").replace(",", "、").replace("；", "、").replace(";", "、")
+        return [item.strip() for item in normalized.split("、") if item.strip()]
+    return value
 
 
 def read_csv_rows(csv_file: Path, *, limit: int) -> list[dict[str, str]]:
@@ -80,7 +100,26 @@ def download_incremental_pdfs(rows: list[dict[str, str]], target_dir: Path) -> P
         if pdf_path.exists() and pdf_path.stat().st_size > 0:
             continue
         print(f"[{index}/{len(rows)}] download {doc_id}")
-        urllib.request.urlretrieve(url, pdf_path)
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+            ),
+            "Accept": "application/pdf,application/octet-stream,*/*",
+            "Referer": "https://www.bse.cn/",
+        }
+        try:
+            import requests
+
+            response = requests.get(url, headers=headers, timeout=120, allow_redirects=True)
+            response.raise_for_status()
+            pdf_path.write_bytes(response.content)
+        except ImportError:
+            request = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(request, timeout=120) as response:
+                pdf_path.write_bytes(response.read())
+        if pdf_path.stat().st_size <= 0:
+            raise SystemExit(f"Downloaded empty PDF: {pdf_path}")
     return pdf_dir
 
 
@@ -108,7 +147,7 @@ def write_labels(workspace: Path, rows: list[dict[str, str]], schema_fields: lis
             field = normalize_field_name(column)
             if field:
                 raw[field] = value or ""
-        label = {field: raw.get(field, "") for field in schema_fields}
+        label = {field: convert_label_value(field, raw.get(field, "")) for field in schema_fields}
         (labels_dir / f"{row['met_uuid'].strip()}.json").write_text(
             json.dumps(label, ensure_ascii=False, indent=2),
             encoding="utf-8",

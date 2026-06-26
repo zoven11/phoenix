@@ -10,7 +10,11 @@ from agentic_extract.evolution_memory.evidence import build_iteration_evidence
 from agentic_extract.evolution_memory.prompt import render_memory_context
 from agentic_extract.evolution_memory.runtime import EvolutionMemoryRuntime
 from agentic_extract.evolution_memory.store import EvolutionMemoryStore
-from agentic_extract.evolution_memory.summarize import build_field_candidates, build_run_candidate
+from agentic_extract.evolution_memory.summarize import (
+    build_field_candidates,
+    build_run_candidate,
+    build_success_field_candidates,
+)
 from agentic_extract.evolution_memory.validate import promote_candidate
 
 
@@ -180,6 +184,110 @@ def test_build_field_candidates_include_location_hints_for_shareholder_notice():
     assert vote_memory.layout_pattern
 
 
+def test_build_field_candidates_include_location_hints_for_annual_report_fields():
+    evaluation = SimpleNamespace(
+        accuracy=0.5,
+        field_average=0.9,
+        doc_count=1,
+        error_count=1,
+        error_doc_ids=["doc-a"],
+        field_accuracies={
+            "其中：境内自然人持股": 0.0,
+            "A 股户数": 0.0,
+            "派息比例[人民币] (10: X)": 0.0,
+            "domestic_signing_cpas": 1.0,
+        },
+    )
+    evidence = build_iteration_evidence(
+        run_id="run-annual-location",
+        iteration=1,
+        action="evaluate",
+        summary="evaluate accuracy=50.0%",
+        error=None,
+        evaluation=evaluation,
+        git_commit_before="before",
+        git_commit_after="after",
+    )
+
+    candidates = build_field_candidates(
+        run_id="run-annual-location",
+        evidence=[evidence],
+        document_category="annual_report",
+        document_family="annual_report",
+        document_topic="annual_report_universal",
+        field_group="annual_report_multi_module",
+    )
+
+    by_field = {item.field_name: item for item in candidates}
+    capital_memory = by_field["其中：境内自然人持股"]
+    assert "股份变动及股东情况" in (capital_memory.section_hint or "")
+    assert "普通股股本结构" in (capital_memory.position_hint or "")
+    assert "董事、监事、高管" in capital_memory.anchor_keywords
+    assert capital_memory.layout_pattern
+    assert "校验" in capital_memory.recommended_action
+    assert "有限售股份总数" in capital_memory.recommended_action
+
+    shareholder_memory = by_field["A 股户数"]
+    assert "股份变动及股东情况" in (shareholder_memory.section_hint or "")
+    assert "普通股股东总数" in shareholder_memory.anchor_keywords
+    assert "整数" in (shareholder_memory.normalization_rule or "")
+    assert "截至报告期末" in shareholder_memory.recommended_action
+
+    dividend_memory = by_field["派息比例[人民币] (10: X)"]
+    assert "权益分派" in (dividend_memory.section_hint or "")
+    assert "年度分配预案" in dividend_memory.anchor_keywords
+    assert "每10股" in (dividend_memory.normalization_rule or "")
+    assert "同一方案" in dividend_memory.recommended_action
+
+
+def test_build_success_field_candidates_include_research_report_location_hints():
+    evidence = build_iteration_evidence(
+        run_id="run-research-success",
+        iteration=4,
+        action="evaluate",
+        summary="evaluate accuracy=100.0%",
+        error=None,
+        evaluation=SimpleNamespace(
+            accuracy=1.0,
+            field_average=1.0,
+            doc_count=3,
+            error_count=0,
+            error_doc_ids=[],
+            field_accuracies={
+                "公司名称": 1.0,
+                "报告日期": 1.0,
+                "风险提示": 1.0,
+            },
+        ),
+        git_commit_before="before",
+        git_commit_after="after",
+    )
+
+    candidates = build_success_field_candidates(
+        run_id="run-research-success",
+        evidence=[evidence],
+        document_category="research_report_universal",
+        document_family="research_report",
+        document_topic="universal_research_report",
+        field_group="research_report_universal_fields",
+    )
+
+    by_field = {item.field_name: item for item in candidates}
+    header_memory = by_field["公司名称"]
+    assert header_memory.category == "successful_field_location"
+    assert "首页封面" in (header_memory.section_hint or "")
+    assert "证券分析师" in header_memory.anchor_keywords
+    assert "相关研究历史日期" in (header_memory.layout_pattern or "")
+
+    revenue_memory = by_field["营业收入"]
+    assert "投资要点" in (revenue_memory.section_hint or "")
+    assert "亿元float" in (revenue_memory.normalization_rule or "")
+
+    risk_memory = by_field["风险提示"]
+    assert "风险提示" in (risk_memory.section_hint or "")
+    assert "免责声明" in risk_memory.recommended_action
+
+
 def test_runtime_selected_memories_for_fields_prioritizes_field_specific_entries(tmp_path):
     workspace_store = EvolutionMemoryStore(tmp_path / "workspace_memory")
     workspace_store.ensure_initialized()
@@ -243,7 +351,7 @@ def test_runtime_selected_memories_for_fields_prioritizes_field_specific_entries
             document_topic="shareholder_meeting_notice",
             field_group="shareholder_meeting_notice_fields",
         )[0]
-    ).model_copy(update={"id": "field-memory", "quality_score": 0.6})
+    ).model_copy(update={"id": "field-memory", "quality_score": 0.8})
     workspace_store.append_memory(field_memory)
 
     runtime = EvolutionMemoryRuntime(
@@ -261,8 +369,214 @@ def test_runtime_selected_memories_for_fields_prioritizes_field_specific_entries
 
     selections = runtime.selected_memories_for_fields(["字段A"])
 
-    assert [item.memory.id for item in selections[:2]] == ["field-memory", "generic-memory"]
+    assert [item.memory.id for item in selections] == ["field-memory"]
 
+
+def test_runtime_selected_memories_for_fields_limits_exact_field_hits(tmp_path):
+    workspace_store = EvolutionMemoryStore(tmp_path / "workspace_memory")
+    workspace_store.ensure_initialized()
+
+    for index in range(5):
+        memory = promote_candidate(
+            build_field_candidates(
+                run_id=f"run-field-{index}",
+                evidence=[
+                    build_iteration_evidence(
+                        run_id=f"run-field-{index}",
+                        iteration=1,
+                        action="evaluate",
+                        summary="evaluate accuracy=50.0%",
+                        error=None,
+                        evaluation=SimpleNamespace(
+                            accuracy=0.5,
+                            field_average=0.5,
+                            doc_count=1,
+                            error_count=1,
+                            error_doc_ids=["doc-a"],
+                            field_accuracies={"字段A": 0.5, "字段B": 1.0},
+                        ),
+                        git_commit_before="",
+                        git_commit_after="",
+                    )
+                ],
+                document_category="shareholder_meeting_notice",
+                document_family="shareholder_meeting_notice",
+                document_topic="shareholder_meeting_notice",
+                field_group="shareholder_meeting_notice_fields",
+            )[0]
+        ).model_copy(
+            update={
+                "id": f"field-memory-{index}",
+                "problem_pattern": f"pattern-{index}",
+                "quality_score": 0.7 + index / 10,
+            }
+        )
+        workspace_store.append_memory(memory)
+
+    runtime = EvolutionMemoryRuntime(
+        enabled=True,
+        run_id="run-select-limit",
+        workspace_store=workspace_store,
+        family_store=None,
+        topic_store=None,
+        top_k=8,
+        document_category="shareholder_meeting_notice",
+        document_family="shareholder_meeting_notice",
+        document_topic="shareholder_meeting_notice",
+        field_group="shareholder_meeting_notice_fields",
+    )
+
+    selections = runtime.selected_memories_for_fields(["字段A"])
+
+    assert len(selections) == 2
+    assert [item.memory.id for item in selections] == [
+        "field-memory-4",
+        "field-memory-3",
+    ]
+
+
+
+
+def test_runtime_selected_memories_for_fields_filters_low_confidence_entries(tmp_path):
+    workspace_store = EvolutionMemoryStore(tmp_path / "workspace_memory")
+    workspace_store.ensure_initialized()
+
+    low_quality = promote_candidate(
+        build_field_candidates(
+            run_id="run-low-quality",
+            evidence=[
+                build_iteration_evidence(
+                    run_id="run-low-quality",
+                    iteration=1,
+                    action="evaluate",
+                    summary="evaluate accuracy=50.0%",
+                    error=None,
+                    evaluation=SimpleNamespace(
+                        accuracy=0.5,
+                        field_average=0.5,
+                        doc_count=1,
+                        error_count=1,
+                        error_doc_ids=["doc-a"],
+                        field_accuracies={"总股本": 0.5},
+                    ),
+                    git_commit_before="",
+                    git_commit_after="",
+                )
+            ],
+            document_category="annual_report",
+            document_family="annual_report",
+            document_topic="annual_report_universal",
+            field_group="share_capital_fields",
+        )[0]
+    ).model_copy(update={"id": "low-quality", "quality_score": 0.4})
+    workspace_store.append_memory(low_quality)
+
+    failing_often = low_quality.model_copy(
+        update={
+            "id": "failing-often",
+            "quality_score": 0.9,
+            "use_count": 5,
+            "success_count": 1,
+            "failure_count": 3,
+        }
+    )
+    workspace_store.append_memory(failing_often)
+
+    reliable = low_quality.model_copy(
+        update={
+            "id": "reliable",
+            "quality_score": 0.9,
+            "use_count": 5,
+            "success_count": 4,
+            "failure_count": 1,
+        }
+    )
+    workspace_store.append_memory(reliable)
+
+    runtime = EvolutionMemoryRuntime(
+        enabled=True,
+        run_id="run-filter",
+        workspace_store=workspace_store,
+        family_store=None,
+        topic_store=None,
+        top_k=8,
+        document_category="annual_report",
+        document_family="annual_report",
+        document_topic="annual_report_universal",
+        field_group="annual_report_multi_module",
+    )
+
+    selections = runtime.selected_memories_for_fields(["总股本"])
+
+    assert [item.memory.id for item in selections] == ["reliable"]
+
+
+def test_runtime_selected_memories_for_fields_falls_back_to_field_group(tmp_path):
+    workspace_store = EvolutionMemoryStore(tmp_path / "workspace_memory")
+    workspace_store.ensure_initialized()
+
+    group_memory = promote_candidate(
+        build_field_candidates(
+            run_id="run-group",
+            evidence=[
+                build_iteration_evidence(
+                    run_id="run-group",
+                    iteration=1,
+                    action="evaluate",
+                    summary="evaluate accuracy=50.0%",
+                    error=None,
+                    evaluation=SimpleNamespace(
+                        accuracy=0.5,
+                        field_average=0.5,
+                        doc_count=1,
+                        error_count=1,
+                        error_doc_ids=["doc-a"],
+                        field_accuracies={"其他字段": 0.5},
+                    ),
+                    git_commit_before="",
+                    git_commit_after="",
+                )
+            ],
+            document_category="annual_report",
+            document_family="annual_report",
+            document_topic="annual_report_universal",
+            field_group="share_capital_fields",
+        )[0]
+    ).model_copy(
+        update={
+            "id": "share-capital-group-memory",
+            "field_name": None,
+            "field_group": "share_capital_fields",
+            "quality_score": 0.9,
+        }
+    )
+    workspace_store.append_memory(group_memory)
+
+    generic_memory = group_memory.model_copy(
+        update={
+            "id": "generic-memory",
+            "field_group": None,
+            "quality_score": 0.95,
+        }
+    )
+    workspace_store.append_memory(generic_memory)
+
+    runtime = EvolutionMemoryRuntime(
+        enabled=True,
+        run_id="run-group-fallback",
+        workspace_store=workspace_store,
+        family_store=None,
+        topic_store=None,
+        top_k=8,
+        document_category="annual_report",
+        document_family="annual_report",
+        document_topic="annual_report_universal",
+        field_group="annual_report_multi_module",
+    )
+
+    selections = runtime.selected_memories_for_fields(["总股本"])
+
+    assert [item.memory.id for item in selections] == ["share-capital-group-memory"]
 
 def test_runtime_finalize_run_populates_shared_pool_candidates_and_evidence(tmp_path):
     workspace_store = EvolutionMemoryStore(tmp_path / "workspace_memory")
@@ -310,6 +624,72 @@ def test_runtime_finalize_run_populates_shared_pool_candidates_and_evidence(tmp_
     assert family_store.evidence_path.read_text(encoding="utf-8").strip()
     assert topic_store.candidates_path.read_text(encoding="utf-8").strip()
     assert topic_store.evidence_path.read_text(encoding="utf-8").strip()
+
+
+def test_runtime_finalize_success_writes_research_report_field_location_memories(tmp_path):
+    workspace_store = EvolutionMemoryStore(tmp_path / "workspace_memory")
+    workspace_store.ensure_initialized()
+    family_store = EvolutionMemoryStore(tmp_path / "family_memory")
+    family_store.ensure_initialized()
+
+    evidence = build_iteration_evidence(
+        run_id="run-research-finalize",
+        iteration=4,
+        action="evaluate",
+        summary="evaluate accuracy=100.0%",
+        error=None,
+        evaluation=SimpleNamespace(
+            accuracy=1.0,
+            field_average=1.0,
+            doc_count=3,
+            error_count=0,
+            error_doc_ids=[],
+            field_accuracies={
+                "公司名称": 1.0,
+                "报告日期": 1.0,
+                "风险提示": 1.0,
+            },
+        ),
+        git_commit_before="before",
+        git_commit_after="after",
+    )
+    workspace_store.append_evidence(evidence)
+
+    runtime = EvolutionMemoryRuntime(
+        enabled=True,
+        run_id="run-research-finalize",
+        workspace_store=workspace_store,
+        family_store=family_store,
+        topic_store=None,
+        top_k=8,
+        document_category="research_report_universal",
+        document_family="research_report",
+        document_topic="universal_research_report",
+        field_group="research_report_universal_fields",
+    )
+
+    runtime.finalize_run(exit_reason="", completed=True)
+
+    workspace_memories = workspace_store.list_memories()
+    research_field_memories = [
+        item
+        for item in workspace_memories
+        if item.category == "successful_field_location"
+    ]
+    assert len(research_field_memories) >= 10
+    assert any(
+        item.field_name == "报告日期" and "首页封面" in (item.section_hint or "")
+        for item in research_field_memories
+    )
+    assert any(
+        item.field_name == "风险提示" and "免责声明" in (item.layout_pattern or "")
+        for item in research_field_memories
+    )
+    assert all(item.quality_score >= 0.65 for item in research_field_memories)
+    assert any(
+        item.category == "successful_field_location"
+        for item in family_store.list_memories()
+    )
 
 
 def test_runtime_merges_workspace_family_and_topic_pools(tmp_path):

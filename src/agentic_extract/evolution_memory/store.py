@@ -50,7 +50,13 @@ class EvolutionMemoryStore:
             line = line.strip()
             if not line:
                 continue
-            records.append(EvolutionMemoryRecord.model_validate_json(line))
+            try:
+                records.append(EvolutionMemoryRecord.model_validate_json(line))
+            except Exception:
+                # Backward compatibility: skip deprecated memory_type values
+                # such as "validated_pattern" so one stale record cannot break
+                # the whole optimization run.
+                continue
         return records
 
     def append_usage(self, usage: EvolutionMemoryUsage) -> None:

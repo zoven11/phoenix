@@ -14,6 +14,7 @@ from .agents import create_business_agent, create_dev_agent, create_supervisor
 from .config import AgenticExtractSettings
 from .evolution_memory.runtime import EvolutionMemoryRuntime
 from .evaluate import format_eval_for_supervisor, run_xdev_eval
+from .extract_result import save_extract_results_for_labels
 from .runtime import RunRecorder, run_in_thread_with_heartbeat, run_with_heartbeat, runtime_scope
 from .state import StateManager
 from .supervisor import get_supervisor_decision, probe_structured_output, validate_api_connectivity
@@ -78,6 +79,28 @@ def _build_memory_guided_dev_task(
         "[Supervisor 原始任务]\n"
         f"{dev_task}"
     )
+
+
+def _should_keep_business_decision(task: str, reasoning: str) -> bool:
+    """Allow BusinessAgent only when the decision cites concrete business data issues."""
+    text = f"{task}\n{reasoning}".lower()
+    strong_markers = [
+        "label missing",
+        "label conflict",
+        "schema conflict",
+        "schema mismatch",
+        "business_guide conflict",
+        "标注缺失",
+        "缺少标注",
+        "标注不一致",
+        "标注冲突",
+        "schema冲突",
+        "schema 不一致",
+        "字段定义冲突",
+        "业务指南冲突",
+        "business_guide",
+    ]
+    return any(marker in text for marker in strong_markers)
 
 
 def _create_agents(settings: AgenticExtractSettings):
@@ -346,6 +369,35 @@ async def run_settings_async(
                 assert decision is not None
 
                 agent_output = ""
+                if (
+                    decision.action == "call_business"
+                    and pending_field_memory_context
+                    and pending_failing_fields
+                    and not _should_keep_business_decision(decision.task, decision.reasoning)
+                ):
+                    fields = ", ".join(pending_failing_fields)
+                    reason = (
+                        "当前失败字段已命中字段级经验，且没有明确 label/schema/business_guide 冲突证据；"
+                        "为减少探索时间，优先让 DevAgent 按经验做代码级定向修复。"
+                    )
+                    await supervisor.observe(
+                        Msg(
+                            name="system",
+                            content=(
+                                f"{reason}\n"
+                                f"失败字段: {fields}\n"
+                                "如后续正式 evaluate 仍显示业务定义或标注冲突，再调用 BusinessAgent。"
+                            ),
+                            role="system",
+                        )
+                    )
+                    decision.action = "call_dev"
+                    decision.reasoning = reason
+                    decision.task = (
+                        f"按字段级经验快速修复当前失败字段：{fields}。"
+                        "不要修改 labels/schema/business_guide；只在 program.py 中做最小代码修复，"
+                        "用错误文档做定向 xdev run 后交回 Supervisor evaluate。"
+                    )
                 if decision.action == "done":
                     latest_evaluation = state.get_latest_evaluation()
                     if (
@@ -617,6 +669,19 @@ async def run_settings_async(
                 exit_reason=exit_reason,
                 completed=completed,
             )
+            if completed:
+                save_summary = await run_in_thread_with_heartbeat(
+                    save_extract_results_for_labels,
+                    workspace_path,
+                    recorder=recorder,
+                    message="正在保存最终提取结果",
+                )
+                logger.info(
+                    "最终提取结果已保存: %s/%s -> %s",
+                    save_summary.success_count,
+                    save_summary.total_count,
+                    save_summary.output_dir,
+                )
             await recorder.finish_phase("finalize", message="finalize completed")
 
         status = "completed" if completed else "failed"

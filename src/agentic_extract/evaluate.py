@@ -77,6 +77,8 @@ def parse_xdev_eval_output(output: str) -> EvaluationSnapshot | None:
     if report_start >= 0:
         report_text = output[report_start:]
 
+    failing_fields = [field for field, acc in field_accuracies.items() if acc < 1.0]
+
     return EvaluationSnapshot(
         accuracy=accuracy,
         field_average=field_average,
@@ -84,6 +86,7 @@ def parse_xdev_eval_output(output: str) -> EvaluationSnapshot | None:
         error_count=error_count,
         error_doc_ids=error_doc_ids,
         field_accuracies=field_accuracies,
+        failing_fields=failing_fields,
         report_text=report_text,
     )
 
